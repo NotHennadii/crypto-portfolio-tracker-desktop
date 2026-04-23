@@ -1,21 +1,20 @@
 # Crypto Portfolio Tracker Desktop (v2)
 
-Windows desktop edition of the product, built with Tauri + React.
+Windows desktop edition of the product, built with Tauri and running the v1 Next.js app locally.
 
 Goal for v2:
 - run fully on user's local machine;
-- avoid cloud-hosted credential storage;
-- move history/signal storage to local persistent database.
+- ship the same feature set as v1 inside a Windows app window;
+- evolve further toward local-first secure storage.
 
 ## Stack
 
 - Tauri 2
-- React + TypeScript + Vite
+- Next.js 16 app (ported from v1 web repo)
 
 ## Current Status
 
-This repository is initialized as the desktop v2 foundation.
-Migration of v1 trading logic/UI into desktop modules is the next phase.
+This repository now includes the v1 application code and launches it via Tauri.
 
 ## Prerequisites (Windows)
 
@@ -34,6 +33,13 @@ npm install
 npm run tauri dev
 ```
 
+If PowerShell blocks `npm` scripts, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+npm run tauri dev
+```
+
 ## Build .exe
 
 ```powershell
@@ -42,10 +48,9 @@ npm run tauri build
 
 Generated installer/binaries are placed under `src-tauri/target/release/bundle/`.
 
-## v1 -> v2 Migration Plan
+## Next Steps
 
-1. Port dashboard screens and components from web v1.
-2. Replace server API routes with local Tauri commands.
-3. Store API keys in OS-level secure storage (no plain localStorage).
-4. Store history/signals in local SQLite.
-5. Add export/import and update channel for desktop releases.
+1. Replace server routes with local Tauri commands (no local web server dependency).
+2. Move sensitive key storage to OS secure vault APIs.
+3. Store history/signals in local SQLite.
+4. Add update channel and signed Windows releases.
