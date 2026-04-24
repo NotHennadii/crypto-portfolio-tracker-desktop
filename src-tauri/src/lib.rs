@@ -142,7 +142,13 @@ $pidToWait={pid}; \
 Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; \
 Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; \
 Start-Process -FilePath '{escaped_out}' -ArgumentList '/S' -Wait; \
-Start-Sleep -Seconds 1; \
+Start-Sleep -Seconds 2; \
+$appDir = Split-Path -Path '{escaped_exe}' -Parent; \
+$runtimeStatic = Join-Path $appDir 'desktop-runtime\\.next\\static'; \
+for ($i = 0; $i -lt 30; $i++) {{ \
+  if ((Test-Path '{escaped_exe}') -and (Test-Path $runtimeStatic)) {{ break }}; \
+  Start-Sleep -Milliseconds 500; \
+}}; \
 Start-Process -FilePath '{escaped_exe}'"
     );
     let mut cmd = Command::new("powershell");
