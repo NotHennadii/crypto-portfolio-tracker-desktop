@@ -744,15 +744,14 @@ export default function Home() {
     setUpdateState((prev) => ({
       ...prev,
       installing: true,
-      message: "Подготавливаем мягкое обновление: приложение закроется, обновится в фоне и запустится снова.",
+      message: "Открываем страницу релиза для безопасного обновления.",
     }));
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("install_update_and_restart", { url: updateState.downloadUrl });
+      window.open(updateState.downloadUrl, "_blank", "noopener,noreferrer");
       setUpdateState((prev) => ({
         ...prev,
         installing: false,
-        message: "Обновление запущено. Приложение закроется автоматически.",
+        message: "Скачайте и установите новый setup вручную (это стабильный режим обновления).",
       }));
     } catch (error) {
       setUpdateState((prev) => ({
