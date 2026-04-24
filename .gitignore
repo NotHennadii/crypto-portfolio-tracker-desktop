@@ -16,6 +16,8 @@
 # next.js
 /.next/
 /out/
+/desktop-runtime/
+/src-tauri/desktop-runtime/
 
 # production
 /build
@@ -48,3 +50,6 @@ next-env.d.ts
 # LitVM runner (JS) — secrets
 /litvm-testnet-runner/accounts.txt
 /litvm-testnet-runner/proxy.txt
+
+# desktop build helpers
+/src-tauri/bin/node.exe

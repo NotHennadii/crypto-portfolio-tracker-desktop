@@ -8,6 +8,11 @@ type ExchangeCredentials = {
   secret: string;
 };
 
+const TRADE_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+const TRADE_PAGE_LIMIT = 200;
+const TRADE_MAX_PAGES = 8;
+const MAX_RECENT_TRADES = 1000;
+
 function asNumber(value: unknown): number {
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
   if (typeof value === "string") {
@@ -107,6 +112,43 @@ function createClient(exchange: SupportedCcxtExchange, credentials: ExchangeCred
   }
 }
 
+function tradeKey(trade: FuturesTrade): string {
+  return `${trade.exchange}|${trade.symbol}|${trade.time}|${trade.side}|${trade.positionSide}|${trade.qty}|${trade.price}`;
+}
+
+async function fetchRecentTradesPaginated(
+  client: { fetchMyTrades: (symbol?: string, since?: number, limit?: number) => Promise<unknown[]> },
+  exchange: SupportedCcxtExchange
+): Promise<FuturesTrade[]> {
+  const merged: FuturesTrade[] = [];
+  const seen = new Set<string>();
+  let since = Date.now() - TRADE_LOOKBACK_MS;
+
+  for (let page = 0; page < TRADE_MAX_PAGES; page += 1) {
+    const rows = (await client.fetchMyTrades(undefined, since, TRADE_PAGE_LIMIT).catch(() => [])) as Array<
+      Record<string, unknown>
+    >;
+    const normalized = normalizeTrades(exchange, rows);
+    if (normalized.length === 0) break;
+    let maxTs = since;
+    let added = 0;
+    for (const trade of normalized) {
+      maxTs = Math.max(maxTs, trade.time);
+      const key = tradeKey(trade);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(trade);
+      added += 1;
+      if (merged.length >= MAX_RECENT_TRADES) break;
+    }
+    if (merged.length >= MAX_RECENT_TRADES) break;
+    if (added === 0 || normalized.length < TRADE_PAGE_LIMIT) break;
+    since = maxTs + 1;
+  }
+
+  return merged.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
+}
+
 export async function fetchCcxtFuturesSnapshot(
   exchange: SupportedCcxtExchange,
   credentials: ExchangeCredentials
@@ -114,10 +156,10 @@ export async function fetchCcxtFuturesSnapshot(
   const client = createClient(exchange, credentials);
   await client.loadMarkets();
 
-  const [balance, positionsRaw, tradesRaw] = await Promise.all([
+  const [balance, positionsRaw, recentTrades] = await Promise.all([
     client.fetchBalance(),
     client.fetchPositions().catch(() => []),
-    client.fetchMyTrades(undefined, undefined, 300).catch(() => []),
+    fetchRecentTradesPaginated(client, exchange),
   ]);
 
   const usdtTotal = asNumber(
@@ -130,7 +172,6 @@ export async function fetchCcxtFuturesSnapshot(
   );
 
   const positions = normalizePositions(exchange, positionsRaw as Array<Record<string, unknown>>);
-  const recentTrades = normalizeTrades(exchange, tradesRaw as Array<Record<string, unknown>>);
   const totalUnrealizedPnl = positions.reduce((sum, item) => sum + item.unrealizedPnl, 0);
   const totalNotional = positions.reduce((sum, item) => sum + Math.abs(item.notionalUsd), 0);
   const usedMargin = positions.reduce((sum, item) => sum + item.marginUsedUsd, 0);
@@ -147,7 +188,7 @@ export async function fetchCcxtFuturesSnapshot(
     marginRatio: usedMargin > 0 ? (usedMargin / Math.max(equity, 1)) * 100 : 0,
     positions,
     recentTrades,
-    diagnostics: [`exchange=${exchange}`],
+    diagnostics: [`exchange=${exchange}`, `recentTrades=${recentTrades.length}`],
     degraded: false,
   };
 }

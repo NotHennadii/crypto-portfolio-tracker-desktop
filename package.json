@@ -1,10 +1,11 @@
 {
-  "name": "crypto-portfolio-tracker-desktop",
-  "version": "0.1.0",
+  "name": "pnl-diary-desktop",
+  "version": "0.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:desktop:web": "next build && node scripts/prepare-desktop.mjs",
     "start": "next start",
     "lint": "eslint",
     "tauri": "tauri"

@@ -54,6 +54,79 @@ type AiReviewPayload = {
   };
 };
 
+type SecureCredentialsPayload = {
+  bingxApiKey?: string;
+  bingxApiSecret?: string;
+  bitgetApiKey?: string;
+  bitgetApiSecret?: string;
+  bitgetPassphrase?: string;
+  binanceApiKey?: string;
+  binanceApiSecret?: string;
+  bybitApiKey?: string;
+  bybitApiSecret?: string;
+  mexcApiKey?: string;
+  mexcApiSecret?: string;
+  gateApiKey?: string;
+  gateApiSecret?: string;
+};
+
+type UpdateState = {
+  checking: boolean;
+  installing: boolean;
+  message: string | null;
+  downloadUrl: string | null;
+};
+
+type GithubLatestRelease = {
+  tag_name?: string;
+  html_url?: string;
+  assets?: Array<{
+    name?: string;
+    browser_download_url?: string;
+  }>;
+};
+
+type GithubTag = {
+  name?: string;
+};
+
+const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0";
+const UPDATE_REPO = process.env.NEXT_PUBLIC_DESKTOP_UPDATE_REPO ?? "NotHennadii/crypto-portfolio-tracker-desktop";
+
+function normalizeVersion(raw: string): number[] {
+  return raw
+    .trim()
+    .replace(/^v/i, "")
+    .split(".")
+    .map((part) => Number(part.replace(/[^0-9].*$/, "")) || 0);
+}
+
+function isRemoteVersionNewer(localVersion: string, remoteVersion: string): boolean {
+  const local = normalizeVersion(localVersion);
+  const remote = normalizeVersion(remoteVersion);
+  const maxLength = Math.max(local.length, remote.length);
+  for (let i = 0; i < maxLength; i += 1) {
+    const l = local[i] ?? 0;
+    const r = remote[i] ?? 0;
+    if (r > l) return true;
+    if (r < l) return false;
+  }
+  return false;
+}
+
+function pickInstallerUrl(release: GithubLatestRelease): string | null {
+  const assets = release.assets ?? [];
+  const setupExe = assets.find(
+    (asset) => asset.name?.toLowerCase().endsWith("-setup.exe") && asset.browser_download_url
+  )?.browser_download_url;
+  if (setupExe) return setupExe;
+  const msi = assets.find(
+    (asset) => asset.name?.toLowerCase().endsWith(".msi") && asset.browser_download_url
+  )?.browser_download_url;
+  if (msi) return msi;
+  return release.html_url ?? null;
+}
+
 function toSignalValue(raw: string): TradeSignal | null {
   const cleaned = raw
     .trim()
@@ -149,57 +222,92 @@ export default function Home() {
   const [loadingSingleTradeReviewKey, setLoadingSingleTradeReviewKey] = useState<string | null>(null);
   const [isPageVisible, setIsPageVisible] = useState(true);
   const [isOnline, setIsOnline] = useState(true);
+  const [updateState, setUpdateState] = useState<UpdateState>({
+    checking: false,
+    installing: false,
+    message: null,
+    downloadUrl: null,
+  });
   const skipNextAutoRefreshRef = useRef(false);
   const snapshot = data?.snapshot;
 
-  useEffect(() => {
-    if (!ZERO_STORAGE_MODE) return;
+  const loadSecureCredentials = useCallback(async (): Promise<SecureCredentialsPayload | null> => {
     try {
-      const raw = window.localStorage.getItem(LOCAL_API_KEYS_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as {
-        bingxApiKey?: string;
-        bingxApiSecret?: string;
-        bitgetApiKey?: string;
-        bitgetApiSecret?: string;
-        bitgetPassphrase?: string;
-        binanceApiKey?: string;
-        binanceApiSecret?: string;
-        bybitApiKey?: string;
-        bybitApiSecret?: string;
-        mexcApiKey?: string;
-        mexcApiSecret?: string;
-        gateApiKey?: string;
-        gateApiSecret?: string;
-      };
-      setBingxApiKey(parsed.bingxApiKey ?? "");
-      setBingxApiSecret(parsed.bingxApiSecret ?? "");
-      setBitgetApiKey(parsed.bitgetApiKey ?? "");
-      setBitgetApiSecret(parsed.bitgetApiSecret ?? "");
-      setBitgetPassphrase(parsed.bitgetPassphrase ?? "");
-      setBinanceApiKey(parsed.binanceApiKey ?? "");
-      setBinanceApiSecret(parsed.binanceApiSecret ?? "");
-      setBybitApiKey(parsed.bybitApiKey ?? "");
-      setBybitApiSecret(parsed.bybitApiSecret ?? "");
-      setMexcApiKey(parsed.mexcApiKey ?? "");
-      setMexcApiSecret(parsed.mexcApiSecret ?? "");
-      setGateApiKey(parsed.gateApiKey ?? "");
-      setGateApiSecret(parsed.gateApiSecret ?? "");
-      const hasAny =
-        Boolean(parsed.bingxApiKey && parsed.bingxApiSecret) ||
-        Boolean(parsed.bitgetApiKey && parsed.bitgetApiSecret && parsed.bitgetPassphrase) ||
-        Boolean(parsed.binanceApiKey && parsed.binanceApiSecret) ||
-        Boolean(parsed.bybitApiKey && parsed.bybitApiSecret) ||
-        Boolean(parsed.mexcApiKey && parsed.mexcApiSecret) ||
-        Boolean(parsed.gateApiKey && parsed.gateApiSecret);
-      if (hasAny) {
-        setConfigured(true);
-        setShowKeyEditor(false);
-      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const payload = await invoke<SecureCredentialsPayload | null>("load_secure_credentials");
+      return payload ?? null;
     } catch {
-      // ignore malformed local key storage
+      return null;
     }
   }, []);
+
+  const saveSecureCredentials = useCallback(async (payload: SecureCredentialsPayload) => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_secure_credentials", { payload });
+  }, []);
+
+  const clearSecureCredentials = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("clear_secure_credentials");
+    } catch {
+      // best effort cleanup
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!ZERO_STORAGE_MODE) return;
+    void (async () => {
+      const secure = await loadSecureCredentials();
+      if (secure) {
+        setBingxApiKey(secure.bingxApiKey ?? "");
+        setBingxApiSecret(secure.bingxApiSecret ?? "");
+        setBitgetApiKey(secure.bitgetApiKey ?? "");
+        setBitgetApiSecret(secure.bitgetApiSecret ?? "");
+        setBitgetPassphrase(secure.bitgetPassphrase ?? "");
+        setBinanceApiKey(secure.binanceApiKey ?? "");
+        setBinanceApiSecret(secure.binanceApiSecret ?? "");
+        setBybitApiKey(secure.bybitApiKey ?? "");
+        setBybitApiSecret(secure.bybitApiSecret ?? "");
+        setMexcApiKey(secure.mexcApiKey ?? "");
+        setMexcApiSecret(secure.mexcApiSecret ?? "");
+        setGateApiKey(secure.gateApiKey ?? "");
+        setGateApiSecret(secure.gateApiSecret ?? "");
+        const hasAny =
+          Boolean(secure.bingxApiKey && secure.bingxApiSecret) ||
+          Boolean(secure.bitgetApiKey && secure.bitgetApiSecret && secure.bitgetPassphrase) ||
+          Boolean(secure.binanceApiKey && secure.binanceApiSecret) ||
+          Boolean(secure.bybitApiKey && secure.bybitApiSecret) ||
+          Boolean(secure.mexcApiKey && secure.mexcApiSecret) ||
+          Boolean(secure.gateApiKey && secure.gateApiSecret);
+        if (hasAny) {
+          setConfigured(true);
+          setShowKeyEditor(false);
+        }
+        return;
+      }
+      try {
+        const raw = window.localStorage.getItem(LOCAL_API_KEYS_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as SecureCredentialsPayload;
+        setBingxApiKey(parsed.bingxApiKey ?? "");
+        setBingxApiSecret(parsed.bingxApiSecret ?? "");
+        setBitgetApiKey(parsed.bitgetApiKey ?? "");
+        setBitgetApiSecret(parsed.bitgetApiSecret ?? "");
+        setBitgetPassphrase(parsed.bitgetPassphrase ?? "");
+        setBinanceApiKey(parsed.binanceApiKey ?? "");
+        setBinanceApiSecret(parsed.binanceApiSecret ?? "");
+        setBybitApiKey(parsed.bybitApiKey ?? "");
+        setBybitApiSecret(parsed.bybitApiSecret ?? "");
+        setMexcApiKey(parsed.mexcApiKey ?? "");
+        setMexcApiSecret(parsed.mexcApiSecret ?? "");
+        setGateApiKey(parsed.gateApiKey ?? "");
+        setGateApiSecret(parsed.gateApiSecret ?? "");
+      } catch {
+        // ignore malformed local key storage
+      }
+    })();
+  }, [loadSecureCredentials]);
 
   useEffect(() => {
     try {
@@ -487,24 +595,31 @@ export default function Home() {
     }
     setRefreshError(null);
     if (ZERO_STORAGE_MODE) {
-      window.localStorage.setItem(
-        LOCAL_API_KEYS_STORAGE_KEY,
-        JSON.stringify({
-          bingxApiKey: bingxApiKey.trim(),
-          bingxApiSecret: bingxApiSecret.trim(),
-          bitgetApiKey: bitgetApiKey.trim(),
-          bitgetApiSecret: bitgetApiSecret.trim(),
-          bitgetPassphrase: bitgetPassphrase.trim(),
-          binanceApiKey: binanceApiKey.trim(),
-          binanceApiSecret: binanceApiSecret.trim(),
-          bybitApiKey: bybitApiKey.trim(),
-          bybitApiSecret: bybitApiSecret.trim(),
-          mexcApiKey: mexcApiKey.trim(),
-          mexcApiSecret: mexcApiSecret.trim(),
-          gateApiKey: gateApiKey.trim(),
-          gateApiSecret: gateApiSecret.trim(),
-        })
-      );
+      const payload = {
+        bingxApiKey: bingxApiKey.trim(),
+        bingxApiSecret: bingxApiSecret.trim(),
+        bitgetApiKey: bitgetApiKey.trim(),
+        bitgetApiSecret: bitgetApiSecret.trim(),
+        bitgetPassphrase: bitgetPassphrase.trim(),
+        binanceApiKey: binanceApiKey.trim(),
+        binanceApiSecret: binanceApiSecret.trim(),
+        bybitApiKey: bybitApiKey.trim(),
+        bybitApiSecret: bybitApiSecret.trim(),
+        mexcApiKey: mexcApiKey.trim(),
+        mexcApiSecret: mexcApiSecret.trim(),
+        gateApiKey: gateApiKey.trim(),
+        gateApiSecret: gateApiSecret.trim(),
+      } satisfies SecureCredentialsPayload;
+      try {
+        await saveSecureCredentials(payload);
+      } catch (error) {
+        window.localStorage.setItem(LOCAL_API_KEYS_STORAGE_KEY, JSON.stringify(payload));
+        setRefreshError(
+          error instanceof Error
+            ? `Не удалось сохранить ключи в защищённое хранилище: ${error.message}`
+            : "Не удалось сохранить ключи в защищённое хранилище."
+        );
+      }
     }
     skipNextAutoRefreshRef.current = true;
     setConfigured(true);
@@ -531,6 +646,7 @@ export default function Home() {
     setGateApiKey("");
     setGateApiSecret("");
     if (ZERO_STORAGE_MODE) {
+      await clearSecureCredentials();
       window.localStorage.removeItem(LOCAL_API_KEYS_STORAGE_KEY);
     }
     setRefreshError(null);
@@ -544,7 +660,103 @@ export default function Home() {
       router.replace("/auth");
     }
     await fetch("/api/futures/credentials", { method: "DELETE" }).catch(() => null);
+    await clearSecureCredentials();
     router.refresh();
+  };
+
+  const checkForUpdates = async () => {
+    setUpdateState((prev) => ({ ...prev, checking: true, message: "Проверяем обновления...", downloadUrl: null }));
+    try {
+      const releasesUrl = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+      const tagsUrl = `https://api.github.com/repos/${UPDATE_REPO}/tags?per_page=1`;
+      const response = await fetch(releasesUrl, {
+        cache: "no-store",
+      });
+      if (response.status === 404) {
+        const tagsResponse = await fetch(tagsUrl, { cache: "no-store" });
+        if (!tagsResponse.ok) {
+          throw new Error(`GitHub API ${tagsResponse.status}`);
+        }
+        const tags = (await tagsResponse.json()) as GithubTag[];
+        const latestTag = tags[0]?.name?.trim() || "";
+        if (!latestTag) {
+          setUpdateState({
+            checking: false,
+            installing: false,
+            message: "Релизы ещё не опубликованы. После создания Release проверка обновлений заработает автоматически.",
+            downloadUrl: null,
+          });
+          return;
+        }
+        if (isRemoteVersionNewer(APP_VERSION, latestTag)) {
+          setUpdateState({
+            checking: false,
+            installing: false,
+            message: `Доступна версия ${latestTag.replace(/^v/i, "")}. Опубликуйте GitHub Release, чтобы скачать обновление в один клик.`,
+            downloadUrl: `https://github.com/${UPDATE_REPO}/releases`,
+          });
+          return;
+        }
+        setUpdateState({
+          checking: false,
+          installing: false,
+          message: `У вас актуальная версия ${APP_VERSION}.`,
+          downloadUrl: null,
+        });
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`GitHub API ${response.status}`);
+      }
+      const latest = (await response.json()) as GithubLatestRelease;
+      const remoteVersion = latest.tag_name?.trim() || "";
+      if (!remoteVersion) {
+        throw new Error("Не удалось определить версию релиза.");
+      }
+      const installerUrl = pickInstallerUrl(latest);
+      if (isRemoteVersionNewer(APP_VERSION, remoteVersion)) {
+        setUpdateState({
+          checking: false,
+          installing: false,
+          message: `Доступно обновление ${remoteVersion.replace(/^v/i, "")} (текущая ${APP_VERSION}).`,
+          downloadUrl: installerUrl,
+        });
+        return;
+      }
+      setUpdateState({
+        checking: false,
+        installing: false,
+        message: `У вас актуальная версия ${APP_VERSION}.`,
+        downloadUrl: null,
+      });
+    } catch (error) {
+      setUpdateState({
+        checking: false,
+        installing: false,
+        message: error instanceof Error ? `Проверка обновлений не удалась: ${error.message}` : "Проверка обновлений не удалась.",
+        downloadUrl: null,
+      });
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!updateState.downloadUrl || updateState.installing) return;
+    setUpdateState((prev) => ({ ...prev, installing: true, message: "Скачиваем и запускаем установщик обновления..." }));
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("install_update_from_url", { url: updateState.downloadUrl });
+      setUpdateState((prev) => ({
+        ...prev,
+        installing: false,
+        message: "Установщик запущен. Завершите обновление и перезапустите приложение.",
+      }));
+    } catch (error) {
+      setUpdateState((prev) => ({
+        ...prev,
+        installing: false,
+        message: error instanceof Error ? `Не удалось запустить обновление: ${error.message}` : "Не удалось запустить обновление.",
+      }));
+    }
   };
   const goToSection = useCallback((sectionId: string) => {
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1304,6 +1516,26 @@ export default function Home() {
                 <button
                   type="button"
                   className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"}`}
+                  onClick={() => void checkForUpdates()}
+                  disabled={updateState.checking}
+                >
+                  <MaterialIcon name="settings" />
+                  <span>{updateState.checking ? "Проверка..." : "Проверить обновления"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"} disabled:opacity-50`}
+                  onClick={() => {
+                    void installUpdate();
+                  }}
+                  disabled={!updateState.downloadUrl || updateState.installing}
+                >
+                  <MaterialIcon name="history" />
+                  <span>{updateState.installing ? "Запуск..." : "Установить обновление"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"}`}
                   onClick={() => void handleSignOut()}
                 >
                   <MaterialIcon name="logout" />
@@ -1359,6 +1591,11 @@ export default function Home() {
                 </button>
               </div>
               <div className="space-y-2">
+                {updateState.message ? (
+                  <p className={isLightTheme ? "rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600" : "rounded-lg border border-[rgba(120,190,220,0.16)] bg-[#0C1822] px-2 py-1 text-[11px] text-[#A7C3D1]"}>
+                    {updateState.message}
+                  </p>
+                ) : null}
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { goToSection("overview-section"); setShowMobileMenu(false); }}>Обзор</button>
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { goToSection("trading-section"); setShowMobileMenu(false); }}>Торговые данные</button>
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { goToSection("positions-section"); setShowMobileMenu(false); }}>Открытые позиции</button>
@@ -1376,10 +1613,35 @@ export default function Home() {
                   </button>
                 ) : null}
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { setShowKeyEditor((prev) => !prev); setShowMobileMenu(false); }}>API ключи</button>
+                <button
+                  type="button"
+                  className={`${controlClass} w-full text-left disabled:opacity-50`}
+                  onClick={() => {
+                    void checkForUpdates();
+                  }}
+                  disabled={updateState.checking}
+                >
+                  {updateState.checking ? "Проверка обновлений..." : "Проверить обновления"}
+                </button>
+                <button
+                  type="button"
+                  className={`${controlClass} w-full text-left disabled:opacity-50`}
+                  onClick={() => {
+                    void installUpdate();
+                  }}
+                  disabled={!updateState.downloadUrl || updateState.installing}
+                >
+                  {updateState.installing ? "Запуск обновления..." : "Установить обновление"}
+                </button>
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { void handleSignOut(); setShowMobileMenu(false); }}>Выйти</button>
               </div>
             </div>
           </div>
+        ) : null}
+        {updateState.message ? (
+          <p className={isLightTheme ? "rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600" : "rounded-xl border border-[rgba(120,190,220,0.16)] bg-[#0C1822]/90 px-3 py-2 text-xs text-[#A7C3D1]"}>
+            {updateState.message}
+          </p>
         ) : null}
         <section className="py-1">
           {configured ? (

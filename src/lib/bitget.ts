@@ -4,6 +4,10 @@ import { FuturesPosition, FuturesSnapshot, FuturesTrade } from "./futures-types"
 const BASE_URL = process.env.BITGET_BASE_URL ?? "https://api.bitget.com";
 const PRODUCT_TYPE = "USDT-FUTURES";
 const REQUEST_TIMEOUT_MS = 10000;
+const TRADE_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+const TRADE_PAGE_SIZE = 100;
+const TRADE_MAX_PAGES = 10;
+const MAX_RECENT_TRADES = 1000;
 
 function asNumber(value: unknown): number {
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
@@ -176,6 +180,52 @@ function normalizeTrades(raw: unknown): FuturesTrade[] {
     .sort((a, b) => b.time - a.time);
 }
 
+function tradeKey(trade: FuturesTrade): string {
+  return `${trade.exchange}|${trade.symbol}|${trade.time}|${trade.side}|${trade.positionSide}|${trade.qty}|${trade.price}`;
+}
+
+async function fetchBitgetOrdersHistoryPaginated(
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string
+): Promise<FuturesTrade[]> {
+  const endTime = Date.now();
+  const startTime = endTime - TRADE_LOOKBACK_MS;
+  const merged: FuturesTrade[] = [];
+  const seen = new Set<string>();
+
+  for (let pageNo = 1; pageNo <= TRADE_MAX_PAGES; pageNo += 1) {
+    const pageRaw = await signedGet<unknown[]>(
+      "/api/v2/mix/order/orders-history",
+      {
+        productType: PRODUCT_TYPE,
+        pageSize: TRADE_PAGE_SIZE,
+        pageNo,
+        startTime,
+        endTime,
+      },
+      apiKey,
+      apiSecret,
+      passphrase
+    ).catch(() => []);
+    const normalized = normalizeTrades(pageRaw);
+    if (normalized.length === 0) break;
+    let added = 0;
+    for (const trade of normalized) {
+      const key = tradeKey(trade);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(trade);
+      added += 1;
+      if (merged.length >= MAX_RECENT_TRADES) break;
+    }
+    if (merged.length >= MAX_RECENT_TRADES) break;
+    if (added === 0 || normalized.length < TRADE_PAGE_SIZE) break;
+  }
+
+  return merged.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
+}
+
 export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
   apiKey?: string;
   apiSecret?: string;
@@ -188,10 +238,10 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
     throw new Error("Enter Bitget API key, secret and passphrase.");
   }
 
-  const [accountsRaw, positionsRaw, ordersRaw] = await Promise.all([
+  const [accountsRaw, positionsRaw, recentTrades] = await Promise.all([
     signedGet<unknown[]>("/api/v2/mix/account/accounts", { productType: PRODUCT_TYPE }, apiKey, apiSecret, passphrase),
     signedGet<unknown[]>("/api/v2/mix/position/all-position", { productType: PRODUCT_TYPE, marginCoin: "USDT" }, apiKey, apiSecret, passphrase),
-    signedGet<unknown[]>("/api/v2/mix/order/orders-history", { productType: PRODUCT_TYPE, pageSize: 100 }, apiKey, apiSecret, passphrase),
+    fetchBitgetOrdersHistoryPaginated(apiKey, apiSecret, passphrase),
   ]);
 
   const accounts = extractArray(accountsRaw);
@@ -207,7 +257,6 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
   const totalRealizedPnl = asNumber(account.achievedProfits ?? account.realizedPL);
 
   const positions = normalizePositions(positionsRaw);
-  const recentTrades = normalizeTrades(ordersRaw).slice(0, 500);
   const totalUnrealizedPnl = positions.reduce((sum, item) => sum + item.unrealizedPnl, 0);
   // Bitget account equity usually already includes unrealized PnL.
   // Normalize to "wallet" so global formula wallet + unrealized == equity.
@@ -231,7 +280,7 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
     marginRatio,
     positions,
     recentTrades,
-    diagnostics: ["exchange=BITGET"],
+    diagnostics: ["exchange=BITGET", `recentTrades=${recentTrades.length}`],
     degraded: false,
   };
 }

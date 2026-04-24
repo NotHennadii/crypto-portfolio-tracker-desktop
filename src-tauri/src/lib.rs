@@ -1,14 +1,241 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+use std::{
+    net::TcpStream,
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    sync::Mutex,
+    thread,
+    time::Duration,
+};
+use keyring::Entry;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use url::Url;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+struct ServerState(Mutex<Option<Child>>);
+const CREDENTIAL_SERVICE: &str = "pnl-diary";
+const CREDENTIAL_ACCOUNT: &str = "exchange-api-credentials";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecureCredentials {
+    bingx_api_key: Option<String>,
+    bingx_api_secret: Option<String>,
+    bitget_api_key: Option<String>,
+    bitget_api_secret: Option<String>,
+    bitget_passphrase: Option<String>,
+    binance_api_key: Option<String>,
+    binance_api_secret: Option<String>,
+    bybit_api_key: Option<String>,
+    bybit_api_secret: Option<String>,
+    mexc_api_key: Option<String>,
+    mexc_api_secret: Option<String>,
+    gate_api_key: Option<String>,
+    gate_api_secret: Option<String>,
+}
+
+fn credential_entry() -> Result<Entry, String> {
+    Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT)
+        .map_err(|e| format!("Failed to access secure storage entry: {e}"))
+}
+
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn save_secure_credentials(payload: SecureCredentials) -> Result<(), String> {
+    let serialized = serde_json::to_string(&payload)
+        .map_err(|e| format!("Failed to serialize credentials payload: {e}"))?;
+    let entry = credential_entry()?;
+    entry
+        .set_password(&serialized)
+        .map_err(|e| format!("Failed to write credentials to secure storage: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_secure_credentials() -> Result<Option<SecureCredentials>, String> {
+    let entry = credential_entry()?;
+    match entry.get_password() {
+        Ok(raw) => {
+            let parsed = serde_json::from_str::<SecureCredentials>(&raw)
+                .map_err(|e| format!("Failed to parse secure credentials payload: {e}"))?;
+            Ok(Some(parsed))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Failed to read credentials from secure storage: {e}")),
+    }
+}
+
+#[tauri::command]
+fn clear_secure_credentials() -> Result<(), String> {
+    let entry = credential_entry()?;
+    match entry.delete_credential() {
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Failed to clear secure credentials: {e}")),
+    }
+}
+
+#[tauri::command]
+fn install_update_from_url(url: String) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|e| format!("Invalid update URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Only HTTPS update URLs are allowed.".to_string());
+    }
+    let file_name = parsed
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("pnl-diary-update.exe");
+    let temp_file = std::env::temp_dir().join(file_name);
+    let escaped_url = url.replace('\'', "''");
+    let escaped_out = temp_file.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; Start-Process -FilePath '{escaped_out}'"
+    );
+    let status = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Failed to download installer: {e}"))?;
+    if !status.success() {
+        return Err("Installer download or launch failed.".to_string());
+    }
+    Ok(())
+}
+
+fn wait_for_server(host: &str, port: u16, retries: u32, sleep_ms: u64) -> bool {
+    for _ in 0..retries {
+        if TcpStream::connect((host, port)).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(sleep_ms));
+    }
+    false
+}
+
+fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push((
+            resource_dir.join("desktop-runtime"),
+            resource_dir.join("node.exe"),
+        ));
+    }
+    if let Ok(exe_dir) = app.path().executable_dir() {
+        candidates.push((exe_dir.join("desktop-runtime"), exe_dir.join("node.exe")));
+        candidates.push((
+            exe_dir.parent().unwrap_or(&exe_dir).join("desktop-runtime"),
+            exe_dir.join("node.exe"),
+        ));
+        candidates.push((
+            exe_dir.parent().unwrap_or(&exe_dir).join("desktop-runtime"),
+            exe_dir.parent().unwrap_or(&exe_dir).join("bin").join("node.exe"),
+        ));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push((cwd.join("desktop-runtime"), cwd.join("node.exe")));
+        candidates.push((cwd.join("desktop-runtime"), cwd.join("bin").join("node.exe")));
+    }
+
+    let mut resolved: Option<(PathBuf, PathBuf)> = None;
+    for (runtime_dir, node_path) in candidates {
+        if runtime_dir.join("server.js").exists() && node_path.exists() {
+            resolved = Some((runtime_dir, node_path));
+            break;
+        }
+    }
+    let (runtime_dir, node_path) = resolved.ok_or_else(|| {
+        "Could not locate bundled runtime. Expected desktop-runtime/server.js and node.exe.".to_string()
+    })?;
+    let server_js = runtime_dir.join("server.js");
+
+    let port = "32145";
+    let mut cmd = Command::new(&node_path);
+    cmd.current_dir(&runtime_dir)
+        .arg(&server_js)
+        .env("PORT", port)
+        .env("HOSTNAME", "127.0.0.1")
+        .env("ALLOW_GUEST_MODE", "true")
+        .env("NEXT_PUBLIC_ALLOW_GUEST_MODE", "true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to launch local Next server: {e}"))?;
+
+    app.state::<ServerState>()
+        .0
+        .lock()
+        .map_err(|_| "Failed to lock server state".to_string())?
+        .replace(child);
+
+    if !wait_for_server("127.0.0.1", 32145, 200, 50) {
+        return Err("Local Next server did not become ready on port 32145.".to_string());
+    }
+    Ok(())
+}
+
+fn create_main_window(app: &AppHandle, url: &str) -> Result<(), String> {
+    let target = Url::parse(url).map_err(|e| format!("Invalid app URL: {e}"))?;
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
+        .title("PnL Diary")
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(1024.0, 700.0)
+        .build()
+        .map_err(|e| format!("Failed to create main window: {e}"))?;
+    Ok(())
+}
+
+fn kill_server(app: &AppHandle) {
+    if let Ok(mut guard) = app.state::<ServerState>().0.lock() {
+        if let Some(child) = guard.as_mut() {
+            let _ = child.kill();
+        }
+        *guard = None;
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .manage(ServerState(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            install_update_from_url,
+            save_secure_credentials,
+            load_secure_credentials,
+            clear_secure_credentials
+        ])
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            #[cfg(debug_assertions)]
+            {
+                create_main_window(&app_handle, "http://localhost:1420")?;
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                spawn_local_server(&app_handle)?;
+                create_main_window(&app_handle, "http://127.0.0.1:32145")?;
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, RunEvent::ExitRequested { .. }) {
+                kill_server(&app_handle);
+            }
+        });
 }

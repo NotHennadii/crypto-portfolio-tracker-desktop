@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    crypto_portfolio_tracker_desktop_lib::run()
+    pnl_diary_desktop_lib::run()
 }
