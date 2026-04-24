@@ -89,22 +89,30 @@ fn install_update_from_url(url: String) -> Result<(), String> {
     let escaped_url = url.replace('\'', "''");
     let escaped_out = temp_file.to_string_lossy().replace('\'', "''");
     let script = format!(
-        "Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; Start-Process -FilePath '{escaped_out}'"
+        "$ProgressPreference='SilentlyContinue'; \
+Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; \
+Start-Process -FilePath '{escaped_out}'"
     );
-    let status = Command::new("powershell")
+    let mut cmd = Command::new("powershell");
+    cmd
         .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-WindowStyle")
+        .arg("Hidden")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
         .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("Failed to download installer: {e}"))?;
-    if !status.success() {
-        return Err("Installer download or launch failed.".to_string());
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd.spawn()
+        .map_err(|e| format!("Failed to start background updater: {e}"))?;
     Ok(())
 }
 
