@@ -149,6 +149,22 @@ async function fetchRecentTradesPaginated(
   return merged.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
 }
 
+async function fetchRecentTradesSafe(
+  client: { fetchMyTrades: (symbol?: string, since?: number, limit?: number) => Promise<unknown[]> },
+  exchange: SupportedCcxtExchange
+): Promise<FuturesTrade[]> {
+  try {
+    const paged = await fetchRecentTradesPaginated(client, exchange);
+    if (paged.length > 0) return paged;
+  } catch {
+    // fallback below
+  }
+  const fallbackRows = (await client.fetchMyTrades(undefined, undefined, 300).catch(() => [])) as Array<
+    Record<string, unknown>
+  >;
+  return normalizeTrades(exchange, fallbackRows);
+}
+
 export async function fetchCcxtFuturesSnapshot(
   exchange: SupportedCcxtExchange,
   credentials: ExchangeCredentials
@@ -159,7 +175,7 @@ export async function fetchCcxtFuturesSnapshot(
   const [balance, positionsRaw, recentTrades] = await Promise.all([
     client.fetchBalance(),
     client.fetchPositions().catch(() => []),
-    fetchRecentTradesPaginated(client, exchange),
+    fetchRecentTradesSafe(client, exchange),
   ]);
 
   const usdtTotal = asNumber(

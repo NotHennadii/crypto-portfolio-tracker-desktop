@@ -226,6 +226,27 @@ async function fetchBitgetOrdersHistoryPaginated(
   return merged.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
 }
 
+async function fetchBitgetOrdersHistorySafe(
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string
+): Promise<FuturesTrade[]> {
+  try {
+    const paged = await fetchBitgetOrdersHistoryPaginated(apiKey, apiSecret, passphrase);
+    if (paged.length > 0) return paged;
+  } catch {
+    // fallback below
+  }
+  const legacyRaw = await signedGet<unknown[]>(
+    "/api/v2/mix/order/orders-history",
+    { productType: PRODUCT_TYPE, pageSize: 100 },
+    apiKey,
+    apiSecret,
+    passphrase
+  ).catch(() => []);
+  return normalizeTrades(legacyRaw).slice(0, 500);
+}
+
 export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
   apiKey?: string;
   apiSecret?: string;
@@ -241,7 +262,7 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
   const [accountsRaw, positionsRaw, recentTrades] = await Promise.all([
     signedGet<unknown[]>("/api/v2/mix/account/accounts", { productType: PRODUCT_TYPE }, apiKey, apiSecret, passphrase),
     signedGet<unknown[]>("/api/v2/mix/position/all-position", { productType: PRODUCT_TYPE, marginCoin: "USDT" }, apiKey, apiSecret, passphrase),
-    fetchBitgetOrdersHistoryPaginated(apiKey, apiSecret, passphrase),
+    fetchBitgetOrdersHistorySafe(apiKey, apiSecret, passphrase),
   ]);
 
   const accounts = extractArray(accountsRaw);
