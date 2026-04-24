@@ -193,9 +193,17 @@ fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
             resource_dir.join("desktop-runtime"),
             resource_dir.join("node.exe"),
         ));
+        candidates.push((
+            resource_dir.join("desktop-runtime"),
+            resource_dir.join("bin").join("node.exe"),
+        ));
     }
     if let Ok(exe_dir) = app.path().executable_dir() {
         candidates.push((exe_dir.join("desktop-runtime"), exe_dir.join("node.exe")));
+        candidates.push((
+            exe_dir.join("desktop-runtime"),
+            exe_dir.join("bin").join("node.exe"),
+        ));
         candidates.push((
             exe_dir.parent().unwrap_or(&exe_dir).join("desktop-runtime"),
             exe_dir.join("node.exe"),
@@ -212,13 +220,16 @@ fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
 
     let mut resolved: Option<(PathBuf, PathBuf)> = None;
     for (runtime_dir, node_path) in candidates {
-        if runtime_dir.join("server.js").exists() && node_path.exists() {
+        let has_server = runtime_dir.join("server.js").exists();
+        let has_static = runtime_dir.join(".next").join("static").exists();
+        let has_public = runtime_dir.join("public").exists();
+        if has_server && has_static && has_public && node_path.exists() {
             resolved = Some((runtime_dir, node_path));
             break;
         }
     }
     let (runtime_dir, node_path) = resolved.ok_or_else(|| {
-        "Could not locate bundled runtime. Expected desktop-runtime/server.js and node.exe.".to_string()
+        "Could not locate bundled runtime. Expected desktop-runtime with server.js, .next/static, public, and node.exe.".to_string()
     })?;
     let server_js = runtime_dir.join("server.js");
 
