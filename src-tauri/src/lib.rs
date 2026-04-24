@@ -1,4 +1,5 @@
 use std::{
+    env,
     net::TcpStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -116,6 +117,57 @@ Start-Process -FilePath '{escaped_out}'"
     Ok(())
 }
 
+#[tauri::command]
+fn install_update_and_restart(url: String, app: AppHandle) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|e| format!("Invalid update URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Only HTTPS update URLs are allowed.".to_string());
+    }
+    let file_name = parsed
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("pnl-diary-update.exe");
+    let temp_file = env::temp_dir().join(file_name);
+    let current_exe = env::current_exe()
+        .map_err(|e| format!("Failed to resolve current executable path: {e}"))?;
+    let pid = std::process::id();
+    let escaped_url = url.replace('\'', "''");
+    let escaped_out = temp_file.to_string_lossy().replace('\'', "''");
+    let escaped_exe = current_exe.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+$ProgressPreference='SilentlyContinue'; \
+$pidToWait={pid}; \
+Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; \
+Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; \
+Start-Process -FilePath '{escaped_out}' -ArgumentList '/S' -Wait; \
+Start-Sleep -Seconds 1; \
+Start-Process -FilePath '{escaped_exe}'"
+    );
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-WindowStyle")
+        .arg("Hidden")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("Failed to start silent updater: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
 fn wait_for_server(host: &str, port: u16, retries: u32, sleep_ms: u64) -> bool {
     for _ in 0..retries {
         if TcpStream::connect((host, port)).is_ok() {
@@ -222,6 +274,7 @@ pub fn run() {
         .manage(ServerState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             install_update_from_url,
+            install_update_and_restart,
             save_secure_credentials,
             load_secure_credentials,
             clear_secure_credentials

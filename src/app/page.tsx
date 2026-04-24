@@ -744,16 +744,15 @@ export default function Home() {
     setUpdateState((prev) => ({
       ...prev,
       installing: true,
-      message: "Запускаем фоновое обновление... Приложение не должно зависать.",
+      message: "Подготавливаем мягкое обновление: приложение закроется, обновится в фоне и запустится снова.",
     }));
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("install_update_from_url", { url: updateState.downloadUrl });
+      await invoke("install_update_and_restart", { url: updateState.downloadUrl });
       setUpdateState((prev) => ({
         ...prev,
         installing: false,
-        message:
-          "Обновление загружается в фоне без терминала. Когда откроется установщик, завершите установку и перезапустите приложение.",
+        message: "Запущено обновление в фоне.",
       }));
     } catch (error) {
       setUpdateState((prev) => ({
