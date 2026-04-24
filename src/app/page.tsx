@@ -752,8 +752,10 @@ export default function Home() {
       setUpdateState((prev) => ({
         ...prev,
         installing: false,
-        message: "Запущено обновление в фоне.",
+        message: "Обновление запущено. Закрываем приложение для тихой установки...",
       }));
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
     } catch (error) {
       setUpdateState((prev) => ({
         ...prev,

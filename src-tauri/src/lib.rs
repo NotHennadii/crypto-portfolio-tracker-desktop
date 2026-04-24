@@ -118,7 +118,7 @@ Start-Process -FilePath '{escaped_out}'"
 }
 
 #[tauri::command]
-fn install_update_and_restart(url: String, app: AppHandle) -> Result<(), String> {
+fn install_update_and_restart(url: String) -> Result<(), String> {
     let parsed = Url::parse(&url).map_err(|e| format!("Invalid update URL: {e}"))?;
     if parsed.scheme() != "https" {
         return Err("Only HTTPS update URLs are allowed.".to_string());
@@ -164,7 +164,6 @@ Start-Process -FilePath '{escaped_exe}'"
     }
     cmd.spawn()
         .map_err(|e| format!("Failed to start silent updater: {e}"))?;
-    app.exit(0);
     Ok(())
 }
 
