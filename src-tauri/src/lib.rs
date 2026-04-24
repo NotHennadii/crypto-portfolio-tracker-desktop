@@ -1,5 +1,6 @@
 use std::{
     env,
+    net::TcpListener,
     net::TcpStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -186,7 +187,17 @@ fn wait_for_server(host: &str, port: u16, retries: u32, sleep_ms: u64) -> bool {
     false
 }
 
-fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
+fn pick_free_local_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to reserve local port: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read reserved local port: {e}"))?
+        .port();
+    Ok(port)
+}
+
+fn spawn_local_server(app: &AppHandle) -> Result<String, String> {
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push((
@@ -233,11 +244,12 @@ fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
     })?;
     let server_js = runtime_dir.join("server.js");
 
-    let port = "32145";
+    let port = pick_free_local_port()?;
+    let port_str = port.to_string();
     let mut cmd = Command::new(&node_path);
     cmd.current_dir(&runtime_dir)
         .arg(&server_js)
-        .env("PORT", port)
+        .env("PORT", &port_str)
         .env("HOSTNAME", "127.0.0.1")
         .env("ALLOW_GUEST_MODE", "true")
         .env("NEXT_PUBLIC_ALLOW_GUEST_MODE", "true")
@@ -260,10 +272,12 @@ fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "Failed to lock server state".to_string())?
         .replace(child);
 
-    if !wait_for_server("127.0.0.1", 32145, 200, 50) {
-        return Err("Local Next server did not become ready on port 32145.".to_string());
+    if !wait_for_server("127.0.0.1", port, 200, 50) {
+        return Err(format!(
+            "Local Next server did not become ready on port {port}."
+        ));
     }
-    Ok(())
+    Ok(format!("http://127.0.0.1:{port}"))
 }
 
 fn create_main_window(app: &AppHandle, url: &str) -> Result<(), String> {
@@ -306,8 +320,8 @@ pub fn run() {
             }
             #[cfg(not(debug_assertions))]
             {
-                spawn_local_server(&app_handle)?;
-                create_main_window(&app_handle, "http://127.0.0.1:32145")?;
+                let app_url = spawn_local_server(&app_handle)?;
+                create_main_window(&app_handle, &app_url)?;
             }
             Ok(())
         })
