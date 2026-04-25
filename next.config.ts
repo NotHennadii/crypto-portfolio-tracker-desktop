@@ -8,8 +8,6 @@ const nextConfig: NextConfig = {
   output: "standalone",
   env: {
     NEXT_PUBLIC_APP_VERSION: process.env.npm_package_version ?? "0.1.0",
-    NEXT_PUBLIC_DESKTOP_UPDATE_REPO:
-      process.env.NEXT_PUBLIC_DESKTOP_UPDATE_REPO ?? "NotHennadii/crypto-portfolio-tracker-desktop",
     NEXT_PUBLIC_ALLOW_GUEST_MODE: process.env.NEXT_PUBLIC_ALLOW_GUEST_MODE ?? "true",
   },
   turbopack: {

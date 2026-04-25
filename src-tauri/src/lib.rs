@@ -74,40 +74,6 @@ fn clear_secure_credentials() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn install_update_from_url(url: String) -> Result<(), String> {
-    let parsed = Url::parse(&url).map_err(|e| format!("Invalid update URL: {e}"))?;
-    if parsed.scheme() != "https" {
-        return Err("Only HTTPS update URLs are allowed.".to_string());
-    }
-    let file_name = parsed
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("pnl-diary-update.exe");
-    let temp_file = std::env::temp_dir().join(file_name);
-    let escaped_url = url.replace('\'', "''");
-    let escaped_out = temp_file.to_string_lossy().replace('\'', "''");
-    let script = format!(
-        "Invoke-WebRequest -Uri '{escaped_url}' -OutFile '{escaped_out}'; Start-Process -FilePath '{escaped_out}'"
-    );
-    let status = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("Failed to download installer: {e}"))?;
-    if !status.success() {
-        return Err("Installer download or launch failed.".to_string());
-    }
-    Ok(())
-}
-
 fn wait_for_server(host: &str, port: u16, retries: u32, sleep_ms: u64) -> bool {
     for _ in 0..retries {
         if TcpStream::connect((host, port)).is_ok() {
@@ -120,6 +86,12 @@ fn wait_for_server(host: &str, port: u16, retries: u32, sleep_ms: u64) -> bool {
 
 fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push((exe_dir.join("desktop-runtime"), exe_dir.join("bin").join("node.exe")));
+            candidates.push((exe_dir.join("desktop-runtime"), exe_dir.join("node.exe")));
+        }
+    }
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push((
             resource_dir.join("desktop-runtime"),
@@ -128,6 +100,10 @@ fn spawn_local_server(app: &AppHandle) -> Result<(), String> {
     }
     if let Ok(exe_dir) = app.path().executable_dir() {
         candidates.push((exe_dir.join("desktop-runtime"), exe_dir.join("node.exe")));
+        candidates.push((
+            exe_dir.join("desktop-runtime"),
+            exe_dir.join("bin").join("node.exe"),
+        ));
         candidates.push((
             exe_dir.parent().unwrap_or(&exe_dir).join("desktop-runtime"),
             exe_dir.join("node.exe"),
@@ -210,10 +186,8 @@ fn kill_server(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(ServerState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
-            install_update_from_url,
             save_secure_credentials,
             load_secure_credentials,
             clear_secure_credentials

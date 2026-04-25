@@ -90,7 +90,10 @@ export function computeMetrics(history: FuturesSnapshot[]): FuturesMetrics {
   const firstEquity = equitySeries[0] || 1;
   const equity = equitySeries[equitySeries.length - 1] || 0;
   const totalPnl = equity - firstEquity;
-  const totalPnlPercent = (totalPnl / Math.max(Math.abs(firstEquity), 1)) * 100;
+  // Use "current balance + accumulated loss" as reference when total PnL is negative.
+  // Example: equity=6200 and totalPnl=-826 => reference=7026, pnl%=-11.76%.
+  const percentReferenceBalance = totalPnl < 0 ? equity + Math.abs(totalPnl) : Math.max(equity - totalPnl, 0);
+  const totalPnlPercent = (totalPnl / Math.max(Math.abs(percentReferenceBalance), 1)) * 100;
 
   let peak = equitySeries[0] || 0;
   let maxDrawdown = 0;

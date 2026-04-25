@@ -7,6 +7,14 @@ Goal for v2:
 - ship the same feature set as v1 inside a Windows app window;
 - evolve further toward local-first secure storage.
 
+## Security Profile (Public Release)
+
+- In-app auto-update installer execution is **disabled**.
+- App checks GitHub version metadata only and shows status messages.
+- Update installation is **manual only** (download and run installer from official Releases page).
+- API credentials are stored only in OS secure storage (`keyring` / Windows Credential Manager).
+- Plaintext fallback storage for API keys in browser `localStorage` is removed.
+
 ## Stack
 
 - Tauri 2
@@ -48,9 +56,9 @@ npm run tauri build
 
 Generated installer/binaries are placed under `src-tauri/target/release/bundle/`.
 
-## Next Steps
+## Release Checklist
 
-1. Replace server routes with local Tauri commands (no local web server dependency).
-2. Move sensitive key storage to OS secure vault APIs.
-3. Store history/signals in local SQLite.
-4. Add update channel and signed Windows releases.
+1. Build installer with `npm run tauri build`.
+2. Publish artifacts only to official GitHub Releases.
+3. Sign release artifacts (recommended for public distribution).
+4. Keep Rust/Node dependencies updated and rerun `npm audit --omit=dev` before each release.

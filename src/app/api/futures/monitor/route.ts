@@ -9,12 +9,22 @@ import { requireUserId } from "@/lib/require-user";
 export const runtime = "nodejs";
 const HISTORY_LIMIT = 600;
 const TRADES_PER_SNAPSHOT_LIMIT = 250;
+const STALE_TRADES_WARNING_HOURS = 30;
 
 function compactHistoryForPayload(history: FuturesMonitorResponse["history"]): FuturesMonitorResponse["history"] {
   return history.slice(-HISTORY_LIMIT).map((snapshot) => ({
     ...snapshot,
     recentTrades: snapshot.recentTrades.slice(0, TRADES_PER_SNAPSHOT_LIMIT),
   }));
+}
+
+function getLatestTradeTime(snapshot: FuturesMonitorResponse["snapshot"]): number | null {
+  if (!snapshot || snapshot.recentTrades.length === 0) return null;
+  let maxTs = 0;
+  for (const trade of snapshot.recentTrades) {
+    if (trade.time > maxTs) maxTs = trade.time;
+  }
+  return maxTs > 0 ? maxTs : null;
 }
 
 type MonitorBody = {
@@ -99,6 +109,23 @@ async function handleMonitor(body?: MonitorBody) {
       warnings.push(
         "Часть эндпоинтов бирж временно недоступна. Показаны данные по тем биржам, ответившим успешно."
       );
+    }
+    const latestTradeTime = getLatestTradeTime(snapshot);
+    if (latestTradeTime != null) {
+      const ageHours = (Date.now() - latestTradeTime) / (60 * 60 * 1000);
+      if (ageHours > STALE_TRADES_WARNING_HOURS) {
+        warnings.push(
+          `Последняя сделка в ответе бирж: ${new Date(latestTradeTime).toLocaleString("ru-RU")} (~${Math.floor(ageHours)}ч назад).`
+        );
+        const tradeDiagnostics = (snapshot.diagnostics ?? []).filter(
+          (item) => item.startsWith("exchange=") || item.startsWith("recentTrades=") || item.startsWith("latestTradeTime=")
+        );
+        if (tradeDiagnostics.length > 0) {
+          warnings.push(`Диагностика сделок: ${tradeDiagnostics.join(" | ")}`);
+        }
+      }
+    } else {
+      warnings.push("Биржи не вернули историю сделок в этом обновлении.");
     }
     const history = await appendSnapshot(auth.userId, snapshot);
     const tradeSignals = await readTradeSignals(auth.userId);

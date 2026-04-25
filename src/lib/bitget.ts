@@ -5,6 +5,7 @@ const BASE_URL = process.env.BITGET_BASE_URL ?? "https://api.bitget.com";
 const PRODUCT_TYPE = "USDT-FUTURES";
 const REQUEST_TIMEOUT_MS = 10000;
 const TRADE_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+const TRADE_LIVE_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 const TRADE_PAGE_SIZE = 100;
 const TRADE_MAX_PAGES = 10;
 const MAX_RECENT_TRADES = 1000;
@@ -16,6 +17,12 @@ function asNumber(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+function normalizeTimestamp(value: unknown): number {
+  const raw = asNumber(value);
+  if (!raw) return Date.now();
+  return raw < 1_000_000_000_000 ? raw * 1000 : raw;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -172,7 +179,7 @@ function normalizeTrades(raw: unknown): FuturesTrade[] {
         pnlPercent: (realizedPnl / marginUsed) * 100,
         fee: asNumber(rec.totalFee ?? rec.fee),
         feeAsset: String(rec.feeCoin ?? "USDT"),
-        time: asNumber(rec.uTime ?? rec.cTime ?? rec.createTime) || Date.now(),
+        time: normalizeTimestamp(rec.uTime ?? rec.cTime ?? rec.createTime),
         isLiquidation: false,
       };
     })
@@ -231,11 +238,64 @@ async function fetchBitgetOrdersHistorySafe(
   apiSecret: string,
   passphrase: string
 ): Promise<FuturesTrade[]> {
+  const now = Date.now();
+  const liveStart = now - TRADE_LIVE_LOOKBACK_MS;
+  const liveWindowRaw = await signedGet<unknown[]>(
+    "/api/v2/mix/order/orders-history",
+    {
+      productType: PRODUCT_TYPE,
+      pageSize: TRADE_PAGE_SIZE,
+      pageNo: 1,
+      startTime: liveStart,
+      endTime: now,
+    },
+    apiKey,
+    apiSecret,
+    passphrase
+  ).catch(() => []);
+  const liveWindowTrades = normalizeTrades(liveWindowRaw);
+  const latestPagesRaw = await Promise.all(
+    [1, 2, 3].map((pageNo) =>
+      signedGet<unknown[]>(
+        "/api/v2/mix/order/orders-history",
+        { productType: PRODUCT_TYPE, pageSize: TRADE_PAGE_SIZE, pageNo },
+        apiKey,
+        apiSecret,
+        passphrase
+      ).catch(() => [])
+    )
+  );
+  const latestTrades = latestPagesRaw.flatMap((raw) => normalizeTrades(raw));
+  const liveSeed = [...liveWindowTrades, ...latestTrades];
   try {
     const paged = await fetchBitgetOrdersHistoryPaginated(apiKey, apiSecret, passphrase);
-    if (paged.length > 0) return paged;
+    if (paged.length > 0 || liveSeed.length > 0) {
+      const merged = [...liveSeed, ...paged];
+      const seen = new Set<string>();
+      const deduped: FuturesTrade[] = [];
+      for (const trade of merged) {
+        const key = tradeKey(trade);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(trade);
+        if (deduped.length >= MAX_RECENT_TRADES) break;
+      }
+      return deduped.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
+    }
   } catch {
     // fallback below
+  }
+  if (liveSeed.length > 0) {
+    const seen = new Set<string>();
+    const deduped: FuturesTrade[] = [];
+    for (const trade of liveSeed) {
+      const key = tradeKey(trade);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(trade);
+      if (deduped.length >= MAX_RECENT_TRADES) break;
+    }
+    return deduped.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
   }
   const legacyRaw = await signedGet<unknown[]>(
     "/api/v2/mix/order/orders-history",
@@ -278,6 +338,7 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
   const totalRealizedPnl = asNumber(account.achievedProfits ?? account.realizedPL);
 
   const positions = normalizePositions(positionsRaw);
+  const latestTradeTime = recentTrades[0]?.time ?? 0;
   const totalUnrealizedPnl = positions.reduce((sum, item) => sum + item.unrealizedPnl, 0);
   // Bitget account equity usually already includes unrealized PnL.
   // Normalize to "wallet" so global formula wallet + unrealized == equity.
@@ -301,7 +362,11 @@ export async function fetchBitgetFuturesSnapshotWithCredentials(credentials?: {
     marginRatio,
     positions,
     recentTrades,
-    diagnostics: ["exchange=BITGET", `recentTrades=${recentTrades.length}`],
+    diagnostics: [
+      "exchange=BITGET",
+      `recentTrades=${recentTrades.length}`,
+      `latestTradeTime=${latestTradeTime}`,
+    ],
     degraded: false,
   };
 }

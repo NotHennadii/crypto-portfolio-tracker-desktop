@@ -9,6 +9,7 @@ type ExchangeCredentials = {
 };
 
 const TRADE_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+const TRADE_LIVE_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 const TRADE_PAGE_LIMIT = 200;
 const TRADE_MAX_PAGES = 8;
 const MAX_RECENT_TRADES = 1000;
@@ -20,6 +21,12 @@ function asNumber(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+function normalizeTimestamp(value: unknown): number {
+  const raw = asNumber(value);
+  if (!raw) return Date.now();
+  return raw < 1_000_000_000_000 ? raw * 1000 : raw;
 }
 
 function normalizeTrades(exchange: SupportedCcxtExchange, rows: Array<Record<string, unknown>>): FuturesTrade[] {
@@ -51,7 +58,7 @@ function normalizeTrades(exchange: SupportedCcxtExchange, rows: Array<Record<str
         pnlPercent: (realizedPnl / marginUsed) * 100,
         fee,
         feeAsset,
-        time: asNumber(trade.timestamp) || Date.now(),
+        time: normalizeTimestamp(trade.timestamp),
         isLiquidation: false,
       };
     })
@@ -153,16 +160,47 @@ async function fetchRecentTradesSafe(
   client: { fetchMyTrades: (symbol?: string, since?: number, limit?: number) => Promise<unknown[]> },
   exchange: SupportedCcxtExchange
 ): Promise<FuturesTrade[]> {
+  // Dual-source: "live recent" + regular history pagination.
+  const now = Date.now();
+  const liveRows = (await client.fetchMyTrades(undefined, now - TRADE_LIVE_LOOKBACK_MS, TRADE_PAGE_LIMIT).catch(() => [])) as Array<
+    Record<string, unknown>
+  >;
+  const latestRows = (await client.fetchMyTrades(undefined, undefined, 300).catch(() => [])) as Array<Record<string, unknown>>;
+  const liveTrades = normalizeTrades(exchange, liveRows);
+  const latestTrades = normalizeTrades(exchange, latestRows);
+  const seedTrades = [...liveTrades, ...latestTrades];
   try {
     const paged = await fetchRecentTradesPaginated(client, exchange);
-    if (paged.length > 0) return paged;
+    if (paged.length > 0 || seedTrades.length > 0) {
+      const merged = [...seedTrades, ...paged];
+      const seen = new Set<string>();
+      const deduped: FuturesTrade[] = [];
+      for (const trade of merged) {
+        const key = tradeKey(trade);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(trade);
+        if (deduped.length >= MAX_RECENT_TRADES) break;
+      }
+      return deduped.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
+    }
   } catch {
     // fallback below
   }
-  const fallbackRows = (await client.fetchMyTrades(undefined, undefined, 300).catch(() => [])) as Array<
-    Record<string, unknown>
-  >;
-  return normalizeTrades(exchange, fallbackRows);
+  if (seedTrades.length > 0) {
+    const seen = new Set<string>();
+    const deduped: FuturesTrade[] = [];
+    for (const trade of seedTrades) {
+      const key = tradeKey(trade);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(trade);
+      if (deduped.length >= MAX_RECENT_TRADES) break;
+    }
+    return deduped.sort((a, b) => b.time - a.time).slice(0, MAX_RECENT_TRADES);
+  }
+  const fallbackRows = (await client.fetchMyTrades(undefined, undefined, 300).catch(() => [])) as Array<Record<string, unknown>>;
+  return normalizeTrades(exchange, fallbackRows).slice(0, MAX_RECENT_TRADES);
 }
 
 export async function fetchCcxtFuturesSnapshot(
@@ -188,6 +226,7 @@ export async function fetchCcxtFuturesSnapshot(
   );
 
   const positions = normalizePositions(exchange, positionsRaw as Array<Record<string, unknown>>);
+  const latestTradeTime = recentTrades[0]?.time ?? 0;
   const totalUnrealizedPnl = positions.reduce((sum, item) => sum + item.unrealizedPnl, 0);
   const totalNotional = positions.reduce((sum, item) => sum + Math.abs(item.notionalUsd), 0);
   const usedMargin = positions.reduce((sum, item) => sum + item.marginUsedUsd, 0);
@@ -204,7 +243,11 @@ export async function fetchCcxtFuturesSnapshot(
     marginRatio: usedMargin > 0 ? (usedMargin / Math.max(equity, 1)) * 100 : 0,
     positions,
     recentTrades,
-    diagnostics: [`exchange=${exchange}`, `recentTrades=${recentTrades.length}`],
+    diagnostics: [
+      `exchange=${exchange}`,
+      `recentTrades=${recentTrades.length}`,
+      `latestTradeTime=${latestTradeTime}`,
+    ],
     degraded: false,
   };
 }

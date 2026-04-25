@@ -11,10 +11,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/plugin-opener": "^2.5.3",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.103.1",
+    "@tauri-apps/api": "^2.8.0",
     "ccxt": "^4.5.48",
     "next": "16.2.3",
     "protobufjs": "^8.0.1",
@@ -22,14 +21,16 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.8.3",
     "@tailwindcss/postcss": "^4",
+    "@tauri-apps/cli": "^2.8.3",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.3",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^8.0.10"
   }
 }

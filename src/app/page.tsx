@@ -10,8 +10,8 @@ import { hasSupabaseEnv } from "@/lib/supabase-env";
 
 const BASE_POLL_MS = 45000;
 const MAX_POLL_MS = 10 * 60 * 1000;
+const REFRESH_BANNER_MIN_MS = 1200;
 const ZERO_STORAGE_MODE = true;
-const LOCAL_API_KEYS_STORAGE_KEY = "futures-local-api-keys-v1";
 type ExchangeFilter = "ALL" | "BINGX" | "BITGET" | "BINANCE" | "BYBIT" | "MEXC" | "GATE";
 type UiTheme = "dark" | "light";
 const DEFAULT_SIGNAL_OPTIONS: { value: TradeSignal; label: string }[] = [
@@ -72,18 +72,15 @@ type SecureCredentialsPayload = {
 
 type UpdateState = {
   checking: boolean;
-  installing: boolean;
   message: string | null;
-  downloadUrl: string | null;
+};
+
+type RefreshOptions = {
+  showOverlay?: boolean;
 };
 
 type GithubLatestRelease = {
   tag_name?: string;
-  html_url?: string;
-  assets?: Array<{
-    name?: string;
-    browser_download_url?: string;
-  }>;
 };
 
 type GithubTag = {
@@ -112,19 +109,6 @@ function isRemoteVersionNewer(localVersion: string, remoteVersion: string): bool
     if (r < l) return false;
   }
   return false;
-}
-
-function pickInstallerUrl(release: GithubLatestRelease): string | null {
-  const assets = release.assets ?? [];
-  const setupExe = assets.find(
-    (asset) => asset.name?.toLowerCase().endsWith("-setup.exe") && asset.browser_download_url
-  )?.browser_download_url;
-  if (setupExe) return setupExe;
-  const msi = assets.find(
-    (asset) => asset.name?.toLowerCase().endsWith(".msi") && asset.browser_download_url
-  )?.browser_download_url;
-  if (msi) return msi;
-  return release.html_url ?? null;
 }
 
 function toSignalValue(raw: string): TradeSignal | null {
@@ -222,11 +206,10 @@ export default function Home() {
   const [loadingSingleTradeReviewKey, setLoadingSingleTradeReviewKey] = useState<string | null>(null);
   const [isPageVisible, setIsPageVisible] = useState(true);
   const [isOnline, setIsOnline] = useState(true);
+  const [isRefreshingData, setIsRefreshingData] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState>({
     checking: false,
-    installing: false,
     message: null,
-    downloadUrl: null,
   });
   const skipNextAutoRefreshRef = useRef(false);
   const snapshot = data?.snapshot;
@@ -284,27 +267,6 @@ export default function Home() {
           setConfigured(true);
           setShowKeyEditor(false);
         }
-        return;
-      }
-      try {
-        const raw = window.localStorage.getItem(LOCAL_API_KEYS_STORAGE_KEY);
-        if (!raw) return;
-        const parsed = JSON.parse(raw) as SecureCredentialsPayload;
-        setBingxApiKey(parsed.bingxApiKey ?? "");
-        setBingxApiSecret(parsed.bingxApiSecret ?? "");
-        setBitgetApiKey(parsed.bitgetApiKey ?? "");
-        setBitgetApiSecret(parsed.bitgetApiSecret ?? "");
-        setBitgetPassphrase(parsed.bitgetPassphrase ?? "");
-        setBinanceApiKey(parsed.binanceApiKey ?? "");
-        setBinanceApiSecret(parsed.binanceApiSecret ?? "");
-        setBybitApiKey(parsed.bybitApiKey ?? "");
-        setBybitApiSecret(parsed.bybitApiSecret ?? "");
-        setMexcApiKey(parsed.mexcApiKey ?? "");
-        setMexcApiSecret(parsed.mexcApiSecret ?? "");
-        setGateApiKey(parsed.gateApiKey ?? "");
-        setGateApiSecret(parsed.gateApiSecret ?? "");
-      } catch {
-        // ignore malformed local key storage
       }
     })();
   }, [loadSecureCredentials]);
@@ -452,10 +414,15 @@ export default function Home() {
     }
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options?: RefreshOptions) => {
     if (!configured) {
       setLoading(false);
       return;
+    }
+    const showOverlay = Boolean(options?.showOverlay);
+    const refreshStartedAt = Date.now();
+    if (showOverlay) {
+      setIsRefreshingData(true);
     }
     try {
       const response = await fetch("/api/futures/monitor", {
@@ -494,6 +461,14 @@ export default function Home() {
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : "Failed to refresh data");
     } finally {
+      if (showOverlay) {
+        const elapsed = Date.now() - refreshStartedAt;
+        const waitMs = Math.max(0, REFRESH_BANNER_MIN_MS - elapsed);
+        if (waitMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+        setIsRefreshingData(false);
+      }
       setLoading(false);
     }
   }, [
@@ -613,7 +588,6 @@ export default function Home() {
       try {
         await saveSecureCredentials(payload);
       } catch (error) {
-        window.localStorage.setItem(LOCAL_API_KEYS_STORAGE_KEY, JSON.stringify(payload));
         setRefreshError(
           error instanceof Error
             ? `Не удалось сохранить ключи в защищённое хранилище: ${error.message}`
@@ -625,7 +599,7 @@ export default function Home() {
     setConfigured(true);
     setShowKeyEditor(false);
     setLoading(true);
-    void refresh();
+    void refresh({ showOverlay: true });
   };
 
   const handleDisconnect = async () => {
@@ -647,7 +621,6 @@ export default function Home() {
     setGateApiSecret("");
     if (ZERO_STORAGE_MODE) {
       await clearSecureCredentials();
-      window.localStorage.removeItem(LOCAL_API_KEYS_STORAGE_KEY);
     }
     setRefreshError(null);
     setShowKeyEditor(true);
@@ -665,7 +638,7 @@ export default function Home() {
   };
 
   const checkForUpdates = async () => {
-    setUpdateState((prev) => ({ ...prev, checking: true, message: "Проверяем обновления...", downloadUrl: null }));
+    setUpdateState((prev) => ({ ...prev, checking: true, message: "Проверяем обновления..." }));
     try {
       const releasesUrl = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
       const tagsUrl = `https://api.github.com/repos/${UPDATE_REPO}/tags?per_page=1`;
@@ -682,26 +655,20 @@ export default function Home() {
         if (!latestTag) {
           setUpdateState({
             checking: false,
-            installing: false,
             message: "Релизы ещё не опубликованы. После создания Release проверка обновлений заработает автоматически.",
-            downloadUrl: null,
           });
           return;
         }
         if (isRemoteVersionNewer(APP_VERSION, latestTag)) {
           setUpdateState({
             checking: false,
-            installing: false,
-            message: `Доступна версия ${latestTag.replace(/^v/i, "")}. Опубликуйте GitHub Release, чтобы скачать обновление в один клик.`,
-            downloadUrl: `https://github.com/${UPDATE_REPO}/releases`,
+            message: `Доступна версия ${latestTag.replace(/^v/i, "")}. Скачайте её вручную в разделе GitHub Releases.`,
           });
           return;
         }
         setUpdateState({
           checking: false,
-          installing: false,
           message: `У вас актуальная версия ${APP_VERSION}.`,
-          downloadUrl: null,
         });
         return;
       }
@@ -713,49 +680,22 @@ export default function Home() {
       if (!remoteVersion) {
         throw new Error("Не удалось определить версию релиза.");
       }
-      const installerUrl = pickInstallerUrl(latest);
       if (isRemoteVersionNewer(APP_VERSION, remoteVersion)) {
         setUpdateState({
           checking: false,
-          installing: false,
           message: `Доступно обновление ${remoteVersion.replace(/^v/i, "")} (текущая ${APP_VERSION}).`,
-          downloadUrl: installerUrl,
         });
         return;
       }
       setUpdateState({
         checking: false,
-        installing: false,
         message: `У вас актуальная версия ${APP_VERSION}.`,
-        downloadUrl: null,
       });
     } catch (error) {
       setUpdateState({
         checking: false,
-        installing: false,
         message: error instanceof Error ? `Проверка обновлений не удалась: ${error.message}` : "Проверка обновлений не удалась.",
-        downloadUrl: null,
       });
-    }
-  };
-
-  const installUpdate = async () => {
-    if (!updateState.downloadUrl || updateState.installing) return;
-    setUpdateState((prev) => ({ ...prev, installing: true, message: "Скачиваем и запускаем установщик обновления..." }));
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("install_update_from_url", { url: updateState.downloadUrl });
-      setUpdateState((prev) => ({
-        ...prev,
-        installing: false,
-        message: "Установщик запущен. Завершите обновление и перезапустите приложение.",
-      }));
-    } catch (error) {
-      setUpdateState((prev) => ({
-        ...prev,
-        installing: false,
-        message: error instanceof Error ? `Не удалось запустить обновление: ${error.message}` : "Не удалось запустить обновление.",
-      }));
     }
   };
   const goToSection = useCallback((sectionId: string) => {
@@ -1508,7 +1448,10 @@ export default function Home() {
                 <button
                   type="button"
                   className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"}`}
-                  onClick={() => setShowKeyEditor((prev) => !prev)}
+                  onClick={() => {
+                    setShowKeyEditor((prev) => !prev);
+                    setShowProfileMenu(false);
+                  }}
                 >
                   <MaterialIcon name="key" />
                   <span>{showKeyEditor ? "Скрыть API" : "API ключи"}</span>
@@ -1516,7 +1459,10 @@ export default function Home() {
                 <button
                   type="button"
                   className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"}`}
-                  onClick={() => void checkForUpdates()}
+                  onClick={() => {
+                    setShowProfileMenu(false);
+                    void checkForUpdates();
+                  }}
                   disabled={updateState.checking}
                 >
                   <MaterialIcon name="settings" />
@@ -1524,19 +1470,11 @@ export default function Home() {
                 </button>
                 <button
                   type="button"
-                  className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"} disabled:opacity-50`}
-                  onClick={() => {
-                    void installUpdate();
-                  }}
-                  disabled={!updateState.downloadUrl || updateState.installing}
-                >
-                  <MaterialIcon name="history" />
-                  <span>{updateState.installing ? "Запуск..." : "Установить обновление"}</span>
-                </button>
-                <button
-                  type="button"
                   className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${isLightTheme ? "hover:bg-slate-100" : "hover:bg-[#132734]"}`}
-                  onClick={() => void handleSignOut()}
+                  onClick={() => {
+                    setShowProfileMenu(false);
+                    void handleSignOut();
+                  }}
                 >
                   <MaterialIcon name="logout" />
                   <span>Выйти</span>
@@ -1605,7 +1543,7 @@ export default function Home() {
                     type="button"
                     className={`${controlClass} w-full text-left`}
                     onClick={() => {
-                      void refresh();
+                      void refresh({ showOverlay: true });
                       setShowMobileMenu(false);
                     }}
                   >
@@ -1622,16 +1560,6 @@ export default function Home() {
                   disabled={updateState.checking}
                 >
                   {updateState.checking ? "Проверка обновлений..." : "Проверить обновления"}
-                </button>
-                <button
-                  type="button"
-                  className={`${controlClass} w-full text-left disabled:opacity-50`}
-                  onClick={() => {
-                    void installUpdate();
-                  }}
-                  disabled={!updateState.downloadUrl || updateState.installing}
-                >
-                  {updateState.installing ? "Запуск обновления..." : "Установить обновление"}
                 </button>
                 <button type="button" className={`${controlClass} w-full text-left`} onClick={() => { void handleSignOut(); setShowMobileMenu(false); }}>Выйти</button>
               </div>
@@ -1673,7 +1601,7 @@ export default function Home() {
               </button>
               <button
                 type="button"
-                onClick={() => void refresh()}
+                onClick={() => void refresh({ showOverlay: true })}
                 className={`px-2 py-1 text-xs underline underline-offset-4 ${isLightTheme ? "text-slate-600 hover:text-slate-900" : "text-zinc-300 hover:text-white"}`}
               >
                 Обновить
@@ -2571,6 +2499,7 @@ export default function Home() {
         ) : null}
 
         {loading ? <LoadingOverlay /> : null}
+        {configured && isRefreshingData ? <RefreshOverlay isLightTheme={isLightTheme} /> : null}
         </div>
         </div>
       </div>
@@ -2670,6 +2599,29 @@ function LoadingOverlay() {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#050A10]/70 px-4 backdrop-blur-sm">
       <div className="w-full max-w-[640px] overflow-hidden rounded-2xl border border-[rgba(120,190,220,0.16)]">
+        <Image
+          src="/loading-preview.png"
+          alt="Обновление данных"
+          width={1024}
+          height={576}
+          className="h-auto w-full object-cover"
+          priority
+        />
+      </div>
+    </div>
+  );
+}
+
+function RefreshOverlay({ isLightTheme }: { isLightTheme: boolean }) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#050A10]/60 px-4 backdrop-blur-sm">
+      <div
+        className={`w-[30vw] min-w-[280px] max-w-[520px] overflow-hidden rounded-2xl border shadow-2xl ${
+          isLightTheme
+            ? "border-slate-200 bg-white"
+            : "border-[rgba(120,190,220,0.16)] bg-[#09141D]"
+        }`}
+      >
         <Image
           src="/loading-preview.png"
           alt="Обновление данных"
